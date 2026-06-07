@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import secrets
 from telegram import Update
@@ -10,13 +11,15 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 DB = "bot.db"
 
 
-def db():
+def init_db():
     con = sqlite3.connect(DB)
-    con.execute("""
+    cur = con.cursor()
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS channels(
         user_id INTEGER,
         chat_id INTEGER,
@@ -24,31 +27,37 @@ def db():
         PRIMARY KEY(user_id, chat_id)
     )
     """)
-    con.execute("""
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS selected(
         user_id INTEGER PRIMARY KEY,
         chat_id INTEGER
     )
     """)
-    con.execute("""
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS pending(
         code TEXT PRIMARY KEY,
         user_id INTEGER
     )
     """)
+
     con.commit()
-    return con
+    con.close()
+
+
+def get_db():
+    return sqlite3.connect(DB)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Bot running\n\n"
-        "Commands:\n"
-        "/addchannel - apna channel connect karo\n"
-        "/channels - connected channels dekho\n"
-        "/use - channel select karo\n"
-        "/post - forwarded message ko channel me copy karo\n\n"
-        "Bot ko channel me admin banana zaroori hai."
+        "/addchannel - channel connect\n"
+        "/channels - channel list\n"
+        "/use CHANNEL_ID - channel select\n"
+        "/post - forwarded post copy\n\n"
+        "Bot ko channel admin banao."
     )
 
 
@@ -56,29 +65,29 @@ async def addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     code = "CONNECT_" + secrets.token_hex(4).upper()
 
-    con = db()
+    con = get_db()
     con.execute("INSERT OR REPLACE INTO pending(code,user_id) VALUES(?,?)", (code, user_id))
     con.commit()
     con.close()
 
     await update.message.reply_text(
-        "✅ Channel connect karne ke liye:\n\n"
-        "1. Bot ko apne channel me admin banao\n"
-        "2. Channel me ye code post karo:\n\n"
-        f"`{code}`\n\n"
-        "Bot automatic channel save kar dega.",
-        parse_mode="Markdown"
+        "✅ Channel connect steps:\n\n"
+        "1. Bot ko channel admin banao\n"
+        "2. Channel me ye code send/post karo:\n\n"
+        f"{code}\n\n"
+        "Bot channel auto save kar dega."
     )
 
 
-async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def save_channel_from_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post
+
     if not msg or not msg.text:
         return
 
     code = msg.text.strip()
 
-    con = db()
+    con = get_db()
     row = con.execute("SELECT user_id FROM pending WHERE code=?", (code,)).fetchone()
 
     if not row:
@@ -103,59 +112,54 @@ async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-    except:
+    except Exception:
         pass
 
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"✅ Channel connected:\n{title}\n\nAb /post use karke forwarded message copy kar sakte ho."
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Channel connected:\n{title}"
+        )
+    except Exception:
+        pass
 
 
 async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    con = db()
+    con = get_db()
     rows = con.execute(
         "SELECT chat_id,title FROM channels WHERE user_id=?",
         (user_id,)
     ).fetchall()
-    selected_row = con.execute(
-        "SELECT chat_id FROM selected WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
     con.close()
 
     if not rows:
-        await update.message.reply_text("❌ Koi channel connected nahi hai. Pehle /addchannel use karo.")
+        await update.message.reply_text("❌ Pehle /addchannel use karo.")
         return
 
-    selected_id = selected_row[0] if selected_row else None
-
     text = "📢 Your channels:\n\n"
-    for i, row in enumerate(rows, start=1):
-        mark = "✅" if row[0] == selected_id else "▫️"
-        text += f"{mark} {i}. {row[1]}\nID: `{row[0]}`\n\n"
+    for i, (chat_id, title) in enumerate(rows, 1):
+        text += f"{i}. {title}\nID: {chat_id}\n\n"
 
-    text += "Channel select karne ke liye:\n/use channel_id"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
+    text += "Select:\n/use CHANNEL_ID"
+    await update.message.reply_text(text)
 
 
 async def use_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not context.args:
-        await update.message.reply_text("Use karo:\n/use channel_id")
+        await update.message.reply_text("Use:\n/use CHANNEL_ID")
         return
 
     try:
         chat_id = int(context.args[0])
-    except:
-        await update.message.reply_text("❌ Galat channel ID.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID.")
         return
 
-    con = db()
+    con = get_db()
     row = con.execute(
         "SELECT title FROM channels WHERE user_id=? AND chat_id=?",
         (user_id, chat_id)
@@ -163,7 +167,7 @@ async def use_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not row:
         con.close()
-        await update.message.reply_text("❌ Ye channel aapke account me connected nahi hai.")
+        await update.message.reply_text("❌ Ye channel connected nahi hai.")
         return
 
     con.execute(
@@ -173,14 +177,14 @@ async def use_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.commit()
     con.close()
 
-    await update.message.reply_text(f"✅ Selected channel:\n{row[0]}")
+    await update.message.reply_text(f"✅ Selected: {row[0]}")
 
 
-async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_post"] = True
     await update.message.reply_text(
-        "✅ Ab jis message ko post karna hai, mujhe forward karo.\n\n"
-        "Bot usko channel me copy karega, original channel ka link/name nahi dikhega."
+        "✅ Ab forwarded message bhejo.\n"
+        "Bot usko copy karega, forward source/link hide rahega."
     )
 
 
@@ -190,37 +194,24 @@ async def copy_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    con = db()
-    row = con.execute(
-        "SELECT chat_id FROM selected WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
+    con = get_db()
+    row = con.execute("SELECT chat_id FROM selected WHERE user_id=?", (user_id,)).fetchone()
     con.close()
 
     if not row:
-        await update.message.reply_text("❌ Pehle /addchannel se channel connect karo.")
+        await update.message.reply_text("❌ Pehle /addchannel use karo.")
         return
-
-    target_chat_id = row[0]
 
     try:
         await context.bot.copy_message(
-            chat_id=target_chat_id,
+            chat_id=row[0],
             from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id
         )
-
         context.user_data["waiting_post"] = False
-        await update.message.reply_text("✅ Post copied without forward tag/link.")
-
+        await update.message.reply_text("✅ Posted without forward tag/link.")
     except Exception as e:
-        await update.message.reply_text(
-            "❌ Post copy nahi hua.\n\n"
-            "Check karo:\n"
-            "1. Bot channel me admin hai\n"
-            "2. Bot ko post message permission hai\n"
-            f"\nError: {e}"
-        )
+        await update.message.reply_text(f"❌ Error:\n{e}")
 
 
 async def auto_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,13 +222,16 @@ async def auto_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=req.chat.id,
             user_id=req.from_user.id
         )
-        print(f"Accepted: {req.from_user.id} in {req.chat.title}")
     except Exception as e:
-        print("Join accept error:", e)
+        print("Accept error:", e)
 
 
 def main():
-    db()
+    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+        print("❌ BOT_TOKEN add karo.")
+        return
+
+    init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -245,14 +239,14 @@ def main():
     app.add_handler(CommandHandler("addchannel", addchannel))
     app.add_handler(CommandHandler("channels", channels))
     app.add_handler(CommandHandler("use", use_channel))
-    app.add_handler(CommandHandler("post", post_command))
+    app.add_handler(CommandHandler("post", post))
 
     app.add_handler(ChatJoinRequestHandler(auto_accept))
-    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post))
-    app.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE, copy_post))
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, save_channel_from_code))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, copy_post))
 
-    print("Bot started...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("✅ Bot started...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
